@@ -1,0 +1,596 @@
+---
+title: "Untitled"
+author: "Jakub Kreisinger"
+date: "12/9/2022"
+output: html_document
+---
+
+# R packages
+
+```{r }
+library(phyloseq)
+library(vegan)
+library(ggplot2)
+library(ape)
+library(ggplot2)
+library(Polychrome)
+library(plyr)
+library(ggpubr)
+library(plyr)
+library(dplyr)
+library(DESeq2)
+library(missMDA)
+library(factoextra)
+```
+
+# Custom functions
+
+```{r }
+
+prepare_tax_df<-function(PHYLOSEQ,RANK,Unass.symbol=NA,Unass.repl,
+                         min_prop,top_tax,bellow_top,
+                         merge_categories,prop.trans,sort_abu){
+if(prop.trans==T){PHYLOSEQ=transform_sample_counts(PHYLOSEQ,function(x) x/sum(x))}
+TT<-tax_table(PHYLOSEQ)
+class(TT)<-"matrix"
+TT[is.na(tax_table(TT))]<-Unass.repl
+TT<-tax_table(TT)
+tax_table(PHYLOSEQ)<-TT
+
+PHYLOSEQ.merged<-tax_glom(PHYLOSEQ,taxrank=RANK)
+PHYLOSEQ.merged=transform_sample_counts(PHYLOSEQ.merged,function(x) x/sum(x))
+
+#select top taxa
+NAMES<-as.character(tax_table(PHYLOSEQ.merged)[,RANK])
+TS<-taxa_sums(PHYLOSEQ.merged)
+names(TS)<-NAMES
+TS<-rev(sort(TS))
+KEEP<-names(TS)[1:top_tax]
+
+#
+TT<-tax_table(PHYLOSEQ.merged)
+class(TT)<-"matrix"
+TT[,RANK][!TT[,RANK]%in%KEEP]<-bellow_top
+TT<-tax_table(TT)
+tax_table(PHYLOSEQ.merged)<-TT
+PHYLOSEQ.merged<-tax_glom(PHYLOSEQ.merged,taxrank=RANK)
+
+mdf = psmelt(PHYLOSEQ.merged)
+
+if(sort_abu==T){
+  mdf[,RANK]<-as.factor(mdf[,RANK])
+  ADD<-levels(mdf[,RANK])[!levels(mdf[,RANK])%in%KEEP]
+  if(length(ADD)>0){mdf[,RANK]<-factor(mdf[,RANK],levels=c(KEEP,ADD))}
+  if(length(ADD)==0){mdf[,RANK]<-factor(mdf[,RANK],levels=c(KEEP))}
+}
+
+mdf
+}
+
+#####################
+
+
+
+dupl.concensus<-function(PHYLOS,NAMES){
+  
+  # exclude nonduplicated samples
+  IDS<-as.character(data.frame(sample_data(PHYLOS))[,NAMES])
+  IDS.dupl<-IDS[duplicated(IDS)]
+  
+  PHYLOSEQ<-prune_samples(IDS%in%IDS.dupl, PHYLOS)
+  if(length(IDS.dupl)*2<length(IDS)) {NONUPLICATED<-prune_samples(!IDS%in%IDS.dupl, PHYLOS)
+  print(paste("Following names are nonduplicated",sample_names(NONUPLICATED)))}
+  
+  CATS<-as.character(data.frame(sample_data(PHYLOSEQ))[,NAMES])
+  CATS2<-levels(factor(CATS))
+  OTU_TAB<-otu_table(PHYLOSEQ)
+  rownames(OTU_TAB)<-CATS
+  
+  # i<-5
+  for (i in 1:length(CATS2))
+  {
+    # print(CATS2[i])
+    FILTER.act<-colSums(OTU_TAB[rownames(OTU_TAB)==CATS2[i],]>0)>1
+    OTU_TAB[rownames(OTU_TAB)==CATS2[i],]
+    OTU_TAB[rownames(OTU_TAB)==CATS2[i],]<-t(apply(OTU_TAB[rownames(OTU_TAB)==CATS2[i],],1,function(x) x*FILTER.act))
+  }
+  
+  rownames(OTU_TAB)<-sample_names(PHYLOSEQ)
+  otu_table(PHYLOSEQ)<-OTU_TAB
+  PHYLOSEQ.clean<-prune_taxa(taxa_sums(PHYLOSEQ)>0,PHYLOSEQ)
+  
+  PHYLOSEQ.clean
+}
+
+#This script merge technical duplicates (specifired in "NAMES" argument)
+merge.duplicates<-function(PHYLOSEQ,NAMES){
+  CATS<-as.character(data.frame(sample_data(PHYLOSEQ))[,NAMES])
+  sample_data(PHYLOSEQ)$duplic.id<-CATS
+  SAMDAT<-sample_data(PHYLOSEQ)
+  SAMDAT.sub<-subset(SAMDAT,duplicated(CATS)==F)
+  FASTA<-refseq(PHYLOSEQ)
+  rownames(SAMDAT.sub)<-SAMDAT.sub$duplic.id
+  PHYLOSEQ.merge<-merge_samples(PHYLOSEQ,"duplic.id")
+  sample_data(PHYLOSEQ.merge)<-SAMDAT.sub
+  PHYLOSEQ.merge<-merge_phyloseq(PHYLOSEQ.merge,FASTA)
+  PHYLOSEQ.merge
+}
+
+manage_unassigned<-function(PHYLOSEQ,UNASS_STRING=NA,ADD,AFTER=TRUE){
+   TAXall<-data.frame(tax_table(PHYLOSEQ),stringsAsFactors = F)
+   if(!is.na(UNASS_STRING)){TAXall[UNASS_STRING]<-NA}
+   # TAXall<-as.character(TAXall[i,])
+   for(i in 1:dim(TAXall)[1]){  
+       TAX<-as.character(TAXall[i,])
+       if(AFTER==TRUE) {for(j in 2: length(TAX)){
+                            if(is.na(TAX[j])){TAX[j]<-ifelse(regexpr(ADD,TAX[j-1])>0,
+                                           TAX[j-1],paste(TAX[j-1],ADD,sep=""))}}}
+      if(AFTER==FALSE) {for(j in 2: length(TAX)){
+                            if(is.na(TAX[j])){TAX[j]<-ifelse(regexpr(ADD,TAX[j-1])>0,
+                                     TAX[j-1],ADD,paste(TAX[j-1],sep=""))}}}
+      TAXall[i,]<-TAX
+    }
+   TAXA<-colnames(TAXall)
+   SPECIES<-rownames(TAXall)
+   TAXall<-tax_table(TAXall)
+   taxa_names(TAXall)<-SPECIES
+   colnames(TAXall)<-TAXA
+   tax_table(PHYLOSEQ)<-TAXall
+  
+   #output
+   PHYLOSEQ
+}
+
+##############
+
+phyloseq_2_GG<-function(which.taxa,which.phyloseq,manage.ussigned=NULL,unassign.string=NULL){  
+  RESULT<-data.frame(stringsAsFactors = F)
+  SSUMS<-sample_sums(which.phyloseq)
+  for(i in 1: length(which.taxa))
+    {
+      actual.phylos<-prune_taxa(taxa_names(which.phyloseq)%in%which.taxa[i],which.phyloseq)
+      Abundance<-as.numeric(otu_table(actual.phylos))  
+      OTU<-rep(which.taxa[i],length(Abundance))
+      Seq.tot<-rep(SSUMS[i],length(Abundance))
+      Taxo.actual<-as.character(tax_table(actual.phylos))
+      if(manage.ussigned==T){
+        for(j in 2: length(Taxo.actual)){
+          if(is.na(Taxo.actual[j])){Taxo.actual[j]<-ifelse(regexpr(unassign.string,Taxo.actual[j-1])>0,
+                                           Taxo.actual[j-1],paste(Taxo.actual[j-1],unassign.string,sep=""))}
+        }
+      }
+      
+      Taxo.actual.rbind<-do.call("rbind", replicate(length(sample_sums(actual.phylos)), Taxo.actual, simplify = FALSE))
+      colnames(Taxo.actual.rbind)<-colnames(tax_table(which.phyloseq))
+      Sd<-sample_data(actual.phylos)
+      TEMP<-data.frame(Abundance,OTU,Seq.tot,Taxo.actual.rbind,Sd,stringsAsFactors = F)
+      RESULT<-rbind(RESULT,TEMP)
+    }
+    RESULT
+}
+
+################################
+##SCRIPTS FOR GRAPHICAL OUTPUTS#
+################################
+
+# adjusting parameters of ggplot object
+small.fig<-function(x){x+theme_bw()+
+                      theme(axis.text = element_text(size=8),
+                            axis.title = element_text(size=8),
+                            strip.text = element_text(size=8),
+                            legend.text = element_text(size=8),
+                            legend.title = element_text(size=8))}
+
+
+plot_red<-function(x){x+theme(axis.title.x = element_blank(),
+                              legend.title = element_blank())}
+
+
+# preparing data for harvestmans 
+
+prepare_spiders<-function(ORD,PHYLO,AXES,CAT){
+  VECT<-data.frame(ORD$vectors,sample_data(PHYLO))
+  LIST<-list()
+  for(i in 1:length(CAT)){
+    LIST[[i]]<-VECT[,CAT[i]]
+  }
+  
+  CENTROIDx<-tapply(VECT[,AXES[1]],LIST,mean)
+  CENTROIDy<-tapply(VECT[,AXES[2]],LIST,mean)
+  
+  CENTROIDx.l<-reshape2::melt(CENTROIDx)
+  CENTROIDy.l<-reshape2::melt(CENTROIDy)
+  
+  names(CENTROIDx.l)<-c(CAT,"centr.x")
+  names(CENTROIDy.l)<-c(CAT,"centr.y")
+  
+  CENTROIDxy.l<-data.frame(CENTROIDx.l,centr.y=CENTROIDy.l[,dim(CENTROIDy.l)[2]])
+  VECT.l<-join(VECT,CENTROIDxy.l)
+  VECT.l
+}
+
+
+# preparing Hull polygones
+
+Hull_get<-function(ORD,VAR){
+  SCORES<-ORD$data
+  SCORES$VAR<-SCORES[,VAR]
+  SCORES$Scores1<-SCORES[,1]
+  SCORES$Scores2<-SCORES[,2]
+  
+  hull_cyl <- SCORES %>%
+    group_by(VAR) %>%
+    dplyr::slice(chull(Scores1, Scores2))
+  hull_cyl
+}
+
+
+```
+
+
+# Loading data and removing unused samples
+
+```{r }
+load("/media/kreising/DATA/data/Radka_Janet/DADA_PHYLOSEQ/PHYLOSEQ.final_New_met.R")
+PHYLOSEQ.final<-PHYLOSEQ.final_New_met
+
+#Odstranit "out' - vubec se s ni nebude pracovat  
+PHYLOSEQ.final<-prune_samples(sample_data(PHYLOSEQ.final)$Diagnosis!="out",PHYLOSEQ.final)
+
+#Vybrat CTRL + NT_1
+PHYLOSEQ.final<-prune_taxa(taxa_sums(PHYLOSEQ.final)>0,
+                                    PHYLOSEQ.final)
+
+
+```
+
+
+## Summary statistics
+
+```{r}
+PHYLOSEQ.final<-prune_taxa(taxa_sums(PHYLOSEQ.final)>0,PHYLOSEQ.final)
+PHYLOSEQ.final
+sum(otu_table(PHYLOSEQ.final)) #number of heigh quality reas
+summary(sample_sums(PHYLOSEQ.final)) #seq. depth per sample 
+
+```
+
+
+## Alfa diversita (no covariates)
+
+
+```{r}
+
+sample_data(PHYLOSEQ.final)$Diagnosis2<-as.factor(sample_data(PHYLOSEQ.final)$Diagnosis)
+levels(sample_data(PHYLOSEQ.final)$Diagnosis2)<-c("Control" ,"IH",   "NT_1", "NT_2")
+sample_data(PHYLOSEQ.final)$Diagnosis2<-factor(sample_data(PHYLOSEQ.final)$Diagnosis2,levels = c("Control","NT_1","NT_2","IH"))
+
+PHYLOSEQ.final.rare<-rarefy_even_depth(PHYLOSEQ.final)
+PHYLOSEQ.final.prop<-transform_sample_counts(PHYLOSEQ.final,function(x) x/sum(x))
+
+RICH<-estimate_richness(PHYLOSEQ.final.rare)
+RICH<-data.frame(RICH,sample_data(PHYLOSEQ.final.rare))
+
+GG.sh.vio<-ggplot(RICH,aes(x=Diagnosis2,y=Shannon,color=Diagnosis2,fill=Diagnosis2))+geom_violin(alpha=0.3,draw_quantiles=0.5)+geom_jitter()
+GG.ob.vio<-ggplot(RICH,aes(x=Diagnosis2,y=Observed,color=Diagnosis2,fill=Diagnosis2))+geom_violin(alpha=0.3,draw_quantiles=0.5)+geom_jitter()
+
+GG.sh.vio.s<-small.fig(x=GG.sh.vio)
+GG.ob.vio.s<-small.fig(x=GG.ob.vio)  
+ 
+GG.sh.vio.s<-plot_red(x=GG.sh.vio.s)
+GG.ob.vio.s<-plot_red(x=GG.ob.vio.s)  
+
+
+
+GRID.vio<-ggarrange(GG.ob.vio.s+ggtitle("A) ASV richness")+theme(plot.title = element_text(size = 10)),
+                    GG.sh.vio.s+ggtitle("B) Shannon div.")+theme(plot.title = element_text(size = 10)),
+                    nrow = 2,
+                    common.legend = T,legend = "bottom")
+
+GRID.vio
+
+
+
+#Anova models
+summary(aov(RICH$Observed~RICH$Diagnosis2))
+summary(aov(RICH$Shannon~RICH$Diagnosis2))
+  
+
+```
+
+# Barplots - taxonomy
+
+```{r warning=F,message=F}
+PHYLOSEQ.final.prop<-manage_unassigned(PHYLOSEQ=PHYLOSEQ.final.prop,
+                                                UNASS_STRING=NA,ADD="",AFTER=TRUE)
+
+
+DF.tax.caecum.class<-prepare_tax_df(PHYLOSEQ=PHYLOSEQ.final.prop,
+                             RANK="Class",Unass.symbol=NA,
+               Unass.repl="Unassigned",min_prop=NULL,top_tax=9,
+               bellow_top="Others",merge_categories=NULL,
+               prop.trans=TRUE,sort_abu=TRUE)
+
+DF.tax.caecum.genus<-prepare_tax_df(PHYLOSEQ=PHYLOSEQ.final.prop,
+                             RANK="Genus",Unass.symbol=NA,
+               Unass.repl="Unassigned",min_prop=NULL,top_tax=23,
+               bellow_top="Others",merge_categories=NULL,
+               prop.trans=T,sort_abu=TRUE)
+
+library(Polychrome)
+P25<-createPalette(25, c("#010101", "#ff0000"), M=1000) #palette for taxplots
+names(P25)<-NULL
+
+#Class
+ta3 = ggplot(DF.tax.caecum.class, aes_string(x = "ID_individual", y = "Abundance", fill = "Class",order="Class"))+theme_bw(base_size = 12)
+ta3 = ta3 + geom_bar(stat = "identity", position = "stack")
+ta3= ta3 + theme(axis.title.x=element_blank(),axis.text.x = element_text(size = 7, angle = 90),axis.text.y = element_text(hjust = 0,size=10))
+ta3 <- ta3 + facet_grid(.~Diagnosis2, scales = "free",space="free")+
+  theme(strip.text = element_text(size = 10, angle = 0))+
+  scale_fill_manual(values = P25)
+gg.class<-ta3
+
+
+#Genus
+ta3 = ggplot(DF.tax.caecum.genus, aes_string(x = "ID_individual", y = "Abundance", fill = "Genus",order="Genus"))+theme_bw(base_size = 12)
+ta3 = ta3 + geom_bar(stat = "identity", position = "stack")
+ta3= ta3 + theme(axis.title.x=element_blank(),axis.text.x = element_text(size = 7, angle = 90),axis.text.y = element_text(hjust = 0,size=10))
+ta3 <- ta3 + facet_grid(.~Diagnosis2, scales = "free",space="free")+
+  theme(strip.text = element_text(size = 10, angle = 0))+
+  scale_fill_manual(values = P25)
+gg.genus<-ta3
+
+gg.class.s<-small.fig(gg.class)
+gg.genus.s<-small.fig(gg.genus)
+
+gg.class.s<-gg.class.s+theme(axis.text.x = element_blank(),
+                             axis.title.x = element_blank())
+
+
+gg.genus.s<-gg.genus.s+theme(axis.text.x = element_blank(),
+                             axis.title.x = element_blank())
+
+
+gg.class.s
+gg.genus.s
+
+```
+
+# PCoA
+
+```{r}
+BC<-vegdist(otu_table(PHYLOSEQ.final.prop))
+JA<-vegdist(data.frame(otu_table(PHYLOSEQ.final.rare)),method = "jaccard",binary = T)
+
+ord.bc<-ordinate(PHYLOSEQ.final.prop,method = "PCoA", BC)
+ord.bc.p<-plot_ordination(PHYLOSEQ.final.prop,ord.bc,color="Diagnosis2")
+
+ord.ja<-ordinate(PHYLOSEQ.final.prop,method = "PCoA", JA)
+ord.ja.p<-plot_ordination(PHYLOSEQ.final.prop,ord.ja,color="Diagnosis2")
+
+HULL<-Hull_get(ORD=ord.bc.p, VAR="Diagnosis2")
+ord.bc.p<-ord.bc.p+ geom_polygon(data = HULL,aes(fill=Diagnosis2),alpha=0.1)
+
+HULL<-Hull_get(ORD=ord.ja.p, VAR="Diagnosis2")
+ord.ja.p<-ord.ja.p+ geom_polygon(data = HULL,aes(fill=Diagnosis2),alpha=0.1)
+
+Spider_df.bc<-prepare_spiders(ORD=ord.bc, PHYLO=PHYLOSEQ.final.prop,AXES=c(1,2),CAT=c("Diagnosis2"))
+Spider_df.ja<-prepare_spiders(ORD=ord.ja, PHYLO=PHYLOSEQ.final.prop,AXES=c(1,2),CAT=c("Diagnosis2"))
+
+
+ord.bc.p<-ord.bc.p+geom_segment(data=Spider_df.bc,aes(x = centr.x, y = centr.y, xend = Axis.1, yend =Axis.2),
+                  arrow = arrow(length = unit(0.0, "cm")),alpha=0.2)
+
+ord.ja.p<-ord.ja.p+geom_segment(data=Spider_df.ja,aes(x = centr.x, y = centr.y, xend = Axis.1, yend =Axis.2),
+                  arrow = arrow(length = unit(0.0, "cm")),alpha=0.2)
+
+ord.bc.s<-small.fig(ord.bc.p)
+ord.ja.s<-small.fig(ord.ja.p)
+
+ord.bc.s<-ord.bc.s+theme(legend.title = element_blank())
+ord.ja.s<-ord.ja.s+theme(legend.title = element_blank())
+
+GRID.pc<-ggarrange(ord.bc.s+ggtitle("A) Bray - Curtis")+theme(plot.title = element_text(size = 10)),
+                    ord.ja.s+ggtitle("B) Jaccard")+theme(plot.title = element_text(size = 10)),
+                    nrow = 2,
+                    common.legend = T,legend = "bottom")
+
+
+GRID.pc
+
+```
+
+## db-RDA (no covariates)
+
+```{r warning=F,message=F}
+BC.pc<-pcoa(BC)$ vectors
+JA.pc<-pcoa(JA)$ vectors
+SD<-data.frame(sample_data(PHYLOSEQ.final))
+
+BC.rda<-rda(BC.pc~Diagnosis,data=SD)
+anova(BC.rda,by="margin")
+
+JA.rda<-rda(JA.pc~Diagnosis,data=SD)
+anova(JA.rda,by="margin")
+
+#pairwise analyses (Jaccard)
+
+DATA=PHYLOSEQ.final
+VAR="Diagnosis"
+
+pairwise_dbrda.ja<-function(DATA,VAR){
+  SD<-data.frame(sample_data(DATA))
+  COMB<-t(combn(unique(SD[,VAR]),2))
+  
+  AOV.list<-list()
+  for(i in 1:dim(COMB)[1]){
+    SEL<-COMB[i,]
+    TEST<-data.frame(sample_data(DATA)[,VAR])[,1]
+    DATA.sub<-prune_samples(TEST%in%SEL,
+                            DATA)
+  
+    DATA.sub.rare<-rarefy_even_depth(DATA.sub)
+    JA<-vegdist(data.frame(otu_table(DATA.sub)),binary = T,method = "jaccard")
+    JA.pc<-pcoa(JA)$ vectors
+    SD.sub<-data.frame(sample_data(DATA.sub))
+    SD.sub$VAR<-SD.sub[,VAR]
+    RDA<-rda(JA.pc~VAR,data = SD.sub)
+    AOV<-anova(RDA,by="margin")
+    AOV.list[[i]]<-AOV[1,]}
+
+  AOV.df<-do.call("rbind",AOV.list)
+  AOV.df<-data.frame(COMB,AOV.df)
+  AOV.df
+}
+
+pairwise_dbrda.ja(DATA=PHYLOSEQ.final,VAR="Diagnosis")
+
+```
+
+
+# Differential abundance analyses - Deseq2.
+
+```{r }
+
+diagdds = phyloseq_to_deseq2(PHYLOSEQ.final, ~ Diagnosis)
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+
+geoMeans = apply(counts(diagdds), 1, gm_mean)
+diagdds = estimateSizeFactors(diagdds, geoMeans = geoMeans)
+diagdds = DESeq(diagdds, test="LRT", fitType="parametric",reduced = ~1)
+res=results(diagdds,cooksCutoff=T)
+
+res<-data.frame(res,tax_table(PHYLOSEQ.final))
+
+alpha = 0.05
+
+sigtab = res[which(res$padj < alpha), ]
+dim(sigtab)
+
+```
+
+# dbRDA with covariates - dataset preparation
+
+```{r }
+
+##CATEGORIAL DATA TO FACTORS
+sample_data(PHYLOSEQ.final)$Birth<-as.factor(sample_data(PHYLOSEQ.final)$Birth)
+sample_data(PHYLOSEQ.final)$Sex<-as.factor(sample_data(PHYLOSEQ.final)$Sex)
+sample_data(PHYLOSEQ.final)$Untreated.Treated<-as.factor(sample_data(PHYLOSEQ.final)$Untreated.Treated)
+sample_data(PHYLOSEQ.final)$Medication.ritalin<-as.factor(sample_data(PHYLOSEQ.final)$Medication.ritalin)
+sample_data(PHYLOSEQ.final)$Medication.modafinil<-as.factor(sample_data(PHYLOSEQ.final)$Medication.modafinil)
+sample_data(PHYLOSEQ.final)$Medication.oxybate<-as.factor(sample_data(PHYLOSEQ.final)$Medication.oxybate)
+sample_data(PHYLOSEQ.final)$Medication.antidepressants<-as.factor(sample_data(PHYLOSEQ.final)$Medication.antidepressants)
+sample_data(PHYLOSEQ.final)$Medication.thyroxine<-as.factor(sample_data(PHYLOSEQ.final)$Medication.thyroxine)
+sample_data(PHYLOSEQ.final)$Medication.other<-as.factor(sample_data(PHYLOSEQ.final)$Medication.other)
+sample_data(PHYLOSEQ.final)$OSA<-as.factor(sample_data(PHYLOSEQ.final)$OSA)
+sample_data(PHYLOSEQ.final)$Hypertension<-as.factor(sample_data(PHYLOSEQ.final)$Hypertension)
+sample_data(PHYLOSEQ.final)$Thyreopatie<-as.factor(sample_data(PHYLOSEQ.final)$Thyreopatie)
+sample_data(PHYLOSEQ.final)$Allergy<-as.factor(sample_data(PHYLOSEQ.final)$Allergy)
+sample_data(PHYLOSEQ.final)$DM2<-as.factor(sample_data(PHYLOSEQ.final)$DM2)
+sample_data(PHYLOSEQ.final)$Dg.psychiatry<-as.factor(sample_data(PHYLOSEQ.final)$Dg.psychiatry)
+
+PREDICTORS.all<-c("Diagnosis","Birth","Sex","OSA","Hypertension","Thyreopatie","Allergy","DM2","Dg.psychiatry","Age","BMI","Diet.composition","Diet")
+PREDICTORS.narco<-c("Diagnosis","Medication.ritalin","Medication.modafinil","Medication.oxybate","Medication.antidepressants",
+                    "Medication.thyroxine","Medication.other","Disease.duration")
+
+
+
+####PCA for sleeep dat######
+SD<-data.frame(sample_data(PHYLOSEQ.final))
+SD.spanek<-SD[,c("NSS","ESS","IHS","FSS","SIQ")]
+summary(SD.spanek) #many NA for NSS ~ not used in later analyses
+
+SD.spanek2<-SD[,c("ESS","IHS","FSS","SIQ")]
+
+PCA<-imputePCA(SD.spanek2) # prediting missing values
+PCA.res<-prcomp(PCA$completeObs,scale. = TRUE) #PCA for imputed dataset
+
+Diag<-SD$Diagnosis
+fpca<-fviz_pca_biplot(PCA.res,
+                alpha.var=0.5,
+                alpha.ind=0.5,
+                col.ind = Diag, 
+                addEllipses = F, label = "var",
+                col.var = "black", repel = TRUE,
+                legend.title = "Species",labelsize = 2)
+
+fpca #PCA biplot
+
+SD.all<-SD[,PREDICTORS.all]
+SD.all<-data.frame(PCA.res$x[,1:2],SD.all) # pridat PC osy
+SD.all$Diet<-as.numeric(SD.all$Diet)
+SD.all$Diet.composition<-as.numeric(SD.all$Diet.composition)
+```
+
+# dbRDA with covariates - models for all samples
+
+```{r }
+
+#phyloseq bez chybejicich hodnot
+FILTER<-rowSums(is.na(SD.all))==0
+PHYLOSEQ.final.sub<-prune_samples(FILTER,PHYLOSEQ.final)
+SD.all.NoNA<-SD.all[FILTER,]
+
+#PcoA + Jaccard + Bray-Curtis distance
+BC.all<-vegdist(otu_table(transform_sample_counts(PHYLOSEQ.final.sub,function(x) x/sum(x))))
+PC..bc.all<-pcoa(BC.all,correction = "cailliez")
+
+JA.all<-vegdist(data.frame(otu_table(rarefy_even_depth(PHYLOSEQ.final.sub))),method = "jaccard",binary = T)
+PC..ja.all<-pcoa(JA.all,correction = "cailliez")
+
+
+#RDA MODELY
+RDA.full.bc<-rda(PC..bc.all$vectors~PC1+PC2+Diagnosis+Birth+Sex+OSA+Hypertension+Thyreopatie+
+        Allergy+DM2+Dg.psychiatry+Age+BMI+Diet.composition+Diet,SD.all.NoNA)
+RDA.null.bc<-rda(PC..bc.all$vectors~1,SD.all.NoNA)
+anova(RDA.full.bc,RDA.null.bc) # comparing full vs null model
+anova.cca(RDA.full.bc,by="margin") # marginal p values
+
+RDA.full.ja<-rda(PC..ja.all$vectors~PC1+PC2+Diagnosis+Birth+Sex+OSA+Hypertension+Thyreopatie+
+        Allergy+DM2+Dg.psychiatry+Age+BMI+Diet.composition+Diet,SD.all.NoNA)
+RDA.null.ja<-rda(PC..ja.all$vectors~1,SD.all.NoNA)
+anova(RDA.full.ja,RDA.null.ja)
+anova.cca(RDA.full.ja,by="margin") 
+
+```
+
+
+# dbRDA with covariates - models for patients (coltrols excluded)
+
+```{r }
+FILTER2<-sample_data(PHYLOSEQ.final.sub)$Diagnosis!="CTRL"&!is.na(sample_data(PHYLOSEQ.final.sub)$Disease.duration)
+PHYLOSEQ.final.sub.pac<-prune_samples(FILTER2,PHYLOSEQ.final.sub)
+
+SD.pac<-data.frame(sample_data(PHYLOSEQ.final.sub.pac))
+KEEP<-c("Diagnosis","Sex", "Age", "BMI","Diet.composition","Medication.ritalin","Medication.modafinil","Medication.oxybate","Medication.antidepressants","Medication.thyroxine","Medication.other","Disease.duration")
+SD.pac.sub<-SD.pac[,KEEP]
+summary(SD.pac.sub)
+
+#PcoA + Jaccard + Bray-Curtis distance
+BC.all<-vegdist(otu_table(transform_sample_counts(PHYLOSEQ.final.sub.pac,function(x) x/sum(x))))
+PC..bc.all<-pcoa(BC.all,correction = "cailliez")
+
+JA.all<-vegdist(data.frame(otu_table(rarefy_even_depth(PHYLOSEQ.final.sub.pac))),method = "jaccard",binary = T)
+PC..ja.all<-pcoa(JA.all,correction = "cailliez")
+
+
+#RDA MODELS
+RDA.full.bc<-rda(PC..bc.all$vectors~Diagnosis+Sex+Age+BMI+Diet.composition+Medication.ritalin+
+                   Medication.modafinil+Medication.oxybate+Medication.antidepressants+Medication.thyroxine+
+                   Medication.other+Disease.duration,SD.pac.sub)
+RDA.null.bc<-rda(PC..bc.all$vectors~1,SD.pac.sub)
+anova(RDA.full.bc,RDA.null.bc) 
+anova.cca(RDA.full.bc,by="margin") 
+
+RDA.full.ja<-rda(PC..ja.all$vectors~Diagnosis+Sex+Age+BMI+Diet.composition+Medication.ritalin+
+                   Medication.modafinil+Medication.oxybate+Medication.antidepressants+Medication.thyroxine+
+                   Medication.other+Disease.duration,SD.pac.sub)
+RDA.null.ja<-rda(PC..ja.all$vectors~1,SD.pac.sub)
+anova(RDA.full.ja,RDA.null.ja) 
+anova.cca(RDA.full.ja,by="margin") 
+
+
+```

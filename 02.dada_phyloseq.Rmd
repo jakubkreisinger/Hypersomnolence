@@ -1,0 +1,285 @@
+---
+title: "Untitled"
+author: "Jakub Kreisinger"
+date: "8/24/2023"
+output: html_document
+---
+
+```{r}
+library(dada2)
+library(ggplot2)
+
+```
+
+# Quality control + filtering
+```{r}
+setwd("/media/kreising/DATA/data/Radka_Janet/02A.DEMULTI.16s/")
+#List of forward and reverse reads
+LIST<-list.files()
+F_reads<-LIST[grep("_trus-trimmed-pair1.fastq.gz",LIST)]
+R_reads<-LIST[grep("_trus-trimmed-pair2.fastq.gz",LIST)]
+F_reads_TO<-paste0("S",F_reads)
+R_reads_TO<-paste0("S",R_reads)
+
+file.rename(from = F_reads,to=F_reads_TO)
+file.rename(from = R_reads,to=R_reads_TO)
+
+LIST<-list.files()
+F_reads<-LIST[grep("_trus-trimmed-pair1.fastq.gz",LIST)]
+R_reads<-LIST[grep("_trus-trimmed-pair2.fastq.gz",LIST)]
+
+# #graphical representation of quality profiles
+# system("zcat *_trus[12]R_trus-trimmed-pair1.fastq.gz > Merged.fastq")
+# QP.f<-plotQualityProfile("Merged.fastq",aggregate = TRUE)+ggtitle("Forward reads")
+# system("zcat *_trus[12]R_trus-trimmed-pair2.fastq.gz > Merged.fastq")
+# QP.2<-plotQualityProfile("Merged.fastq",aggregate = TRUE)+ggtitle("Rewerse reads")
+# system("rm Merged.fastq")
+# 
+# QP.f
+# QP.2
+
+# ggsave(QP.f,filename = "/media/kreising/DATA/data/Radka_Janet/Forward_reads.pdf")
+# ggsave(QP.2,filename = "/media/kreising/DATA/data/Radka_Janet/Reverse_reads.pdf")
+
+sample.names<-gsub("_trus-trimmed-pair1.fastq.gz","",F_reads)
+sample.names<-gsub("-assigned-","",sample.names)
+filtFs <- paste0(sample.names, "_READ1_filt.fastq.gz")
+filtRs <- paste0(sample.names, "_READ2_filt.fastq.gz")
+
+#Quality filtering
+for(x in 1:length(F_reads)) {
+  print(sample.names[x])
+  fastqPairedFilter(c(F_reads[x], R_reads[x]), c(filtFs[x], filtRs[x]),
+                    maxN=0, maxEE=2, minQ=2,truncQ=2,
+                    compress=TRUE, verbose=TRUE,
+                    minLen = c(270,190),truncLen = c(270,190))
+}
+
+```
+
+# Denoising + abundance matrix
+```{r}
+#List of quality filtered fastq files
+fns <- list.files()
+fastqs <- fns[grepl(".fastq.gz$", fns)]
+fastqs <- sort(fastqs) 
+
+fnFs <- fastqs[grepl("_trus[12]R_READ1_filt.fastq.gz", fastqs)] 
+fnRs <- fastqs[grepl("_trus[12]R_READ2_filt.fastq.gz", fastqs)] 
+sample.names <- gsub("_READ1_filt.fastq.gz","",fnFs)
+
+#fastq dereplication
+derepFs <- derepFastq(fnFs,n = 1e+05, verbose=T)
+derepRs <- derepFastq(fnRs,n = 1e+05, verbose=T)
+
+names(derepFs) <- sample.names
+names(derepRs) <- sample.names
+
+#deoising
+dadaFs <- dada(derepFs, selfConsist = TRUE,MAX_CONSIST=20)
+dadaRs <- dada(derepRs, selfConsist = TRUE,MAX_CONSIST=20)
+
+#merge denoised forward and reverse ASVs
+mergers <- mergePairs(dadaFs, derepFs, dadaRs, derepRs, verbose=TRUE, minOverlap = 10,maxMismatch=1,justConcatenate=F)
+
+#abundance matrix
+seqtab <- makeSequenceTable(mergers)
+
+save(seqtab,file = "/media/kreising/DATA/data/Radka_Janet/DADA_PHYLOSEQ/seqtab.R")
+```
+
+# Removing chimeric sequences (uchime)
+
+```{r}
+#extraxt ASVs fasta from abundance matrix
+FASTA<-DNAStringSet(colnames(seqtab))
+names(FASTA)<-colnames(seqtab)
+writeFasta(FASTA,"haplo.fasta")
+
+# #elimination of chimeric sequences by uchime (Terminal command)
+# system("usearch8.0.1517_i86linux32 -uchime_ref haplo.fasta -db ~/DB/gold.fasta -nonchimeras haplo.uchime.fasta -strand plus")
+
+```
+
+# Taxonomy for nonchimeric ASVs (RDP classifier + Silva v 138 + 80% confidence)
+
+```{r}
+
+############################################
+#TAXONOMY###################################
+############################################
+# databaze se da stahnout tady: https://benjjneb.github.io/dada2/training.html
+
+FASTA<-readDNAStringSet("haplo.uchime.fasta")
+taxa <- assignTaxonomy(as.character(FASTA), 
+                       refFasta="~/DB/DADA2/silva_nr99_v138_train_set.fa.gz", 
+                       multithread=8,minBoot = 80)
+
+```
+
+# Phyloseq object
+
+```{r}
+#OTU TABLE
+seqtab<-otu_table(seqtab,taxa_are_rows = F)
+
+#HAPLO
+HAPLO<-readDNAStringSet("haplo.fasta")
+
+#TAXO
+TAXO<-tax_table(taxa)
+
+PHYLOSEQ<-merge_phyloseq(seqtab,TAXO,HAPLO)
+PHYLOSEQ_dupl<-PHYLOSEQ
+sample_names(PHYLOSEQ)
+
+
+#Provizorni sample metadata
+SN<-sample_names(PHYLOSEQ_dupl)
+SN.mod<-gsub("_F_trus[12]R","",SN)
+
+DF<-data.frame(ID_D=SN,ID=SN.mod)
+DF<-sample_data(DF)
+sample_names(DF)<-SN
+
+sample_data(PHYLOSEQ_dupl)<-DF
+save(PHYLOSEQ_dupl,file = "/media/kreising/DATA/data/Radka_Janet/DADA_PHYLOSEQ/PHYLOSEQ_dupl.R")
+
+# load("/media/kreising/DATA/data/Radka_Janet/DADA_PHYLOSEQ/PHYLOSEQ_dupl.R")
+#write.table
+
+
+################################
+#Corrected metadata#############
+################################
+
+NEW<-read.delim("/media/kreising/DATA/data/Radka_Janet/External_data/Metadata_narko_080523.txt")
+dim(NEW)
+MET_new<-NEW
+
+END<-sapply(strsplit(MET_new$Sample, "_"), function(x) x[4], simplify=T)
+NEW_NAME<-paste0("S",MET_new$ID_individual,"_F_",END)
+
+NEW_NAME[!NEW_NAME%in%sample_names(PHYLOSEQ_dupl)]
+NEW_NAME<-gsub("S84_TE85","S84_TE83",NEW_NAME)
+NEW_NAME<-gsub("S188_SŠ74","S188_SS74",NEW_NAME)
+NEW_NAME[!NEW_NAME%in%sample_names(PHYLOSEQ_dupl)]
+
+sample_names(PHYLOSEQ_dupl)[grep("S84",sample_names(PHYLOSEQ_dupl))]
+head(sample_names(PHYLOSEQ_dupl))
+
+#Spojit se starymi metadaty
+SD<-sample_data(PHYLOSEQ_dupl)
+class(SD)<-"data.frame"
+head(SD)
+MET_new$ID_D<-NEW_NAME
+
+
+SD<-join(SD,MET_new)
+dim(SD)
+SD<-sample_data(SD)
+
+sample_names(SD)<-SD$ID_D
+
+
+sample_data(PHYLOSEQ_dupl)<-SD
+
+```
+
+# Sample duplicates -alpha diversity 
+
+```{r}
+# sample_names(PHYLOSEQ_dupl)
+FILTER<-regexpr("^S[0-9]",sample_names(PHYLOSEQ_dupl))>0
+PHYLOSEQ_dupl.sub<-prune_samples(FILTER,PHYLOSEQ_dupl)
+
+EXCLUDE<-c("S116_SV87_F_trus1R","S185_IP64_F_trus1R","S99_LU05_F_trus1R",
+           "S80_MS93_F_trus2R","S40_MC08_F_trus2R")
+EXCLUDE_pairs<-gsub("_F_trus[12]R","",EXCLUDE)
+
+
+PHYLOSEQ_dupl.sub2<-prune_samples(!sample_data(PHYLOSEQ_dupl.sub)$ID%in%EXCLUDE_pairs,
+                                  PHYLOSEQ_dupl.sub)
+PHYLOSEQ_dupl.excl<-prune_samples(sample_data(PHYLOSEQ_dupl.sub)$ID%in%EXCLUDE_pairs,
+                                  PHYLOSEQ_dupl.sub)
+
+DUPL1<-prune_samples(regexpr("_F_trus1R",sample_names(PHYLOSEQ_dupl.sub2))>0,
+                    PHYLOSEQ_dupl.sub2)
+DUPL2<-prune_samples(regexpr("_F_trus2R",sample_names(PHYLOSEQ_dupl.sub2))>0,
+                    PHYLOSEQ_dupl.sub2)
+
+RICH1<-estimate_richness(DUPL1)
+RICH2<-estimate_richness(DUPL2)
+
+cor.test(RICH1$Shannon,RICH2$Shannon)
+plot(RICH1$Shannon,RICH2$Shannon)
+
+```
+
+# Sample duplicates - beta diversity 
+
+```{r}
+DUPL1.prop<-transform_sample_counts(DUPL1,function(x) x/sum(x))
+DUPL2.prop<-transform_sample_counts(DUPL2,function(x) x/sum(x))
+
+BC1<-vegdist(otu_table(DUPL1.prop))
+BC2<-vegdist(otu_table(DUPL2.prop))
+
+BC1.pc<-pcoa(BC1)$vectors
+BC2.pc<-pcoa(BC2)$vectors
+
+PR<-protest(BC1.pc,BC2.pc)
+PR
+
+plot(PR)
+```
+
+# Sample duplicates - merging
+```{r}
+
+CONC<-dupl.concensus(PHYLOS=PHYLOSEQ_dupl.sub2,NAMES="ID")
+MERGED<-merge.duplicates(PHYLOSEQ = CONC,NAMES="ID")
+
+sum(otu_table(PHYLOSEQ_dupl.sub2))
+sum(otu_table(CONC))
+sum(otu_table(MERGED))
+
+PHYLOSEQ_dupl.sub2
+MERGED
+# sort(sample_sums(MERGED))
+
+```
+
+```{r}
+PHYLOSEQ_dupl.excl.fin<-prune_samples(sample_sums(PHYLOSEQ_dupl.excl)>1000,
+                                      PHYLOSEQ_dupl.excl)
+PHYLOSEQ_dupl.excl.fin.prop<-transform_sample_counts(PHYLOSEQ_dupl.excl.fin,function(x) x/sum(x))
+
+FILT1<-taxa_names(PHYLOSEQ_dupl.excl.fin)%in%taxa_names(MERGED)
+FILT2<-apply(otu_table(PHYLOSEQ_dupl.excl.fin.prop),2,max)>0.01
+
+FILT12<-FILT1+FILT2>0
+# sum(FILT12)
+
+NONDUPL<-prune_taxa(FILT12,PHYLOSEQ_dupl.excl.fin)
+
+PHYLOSEQ.final<-merge_phyloseq(MERGED,NONDUPL)
+
+```
+
+# Removing unassigned ASVs
+
+```{r}
+FILTa<-is.na(as.character(tax_table(PHYLOSEQ.final)[,2]))
+FF<-(FILTa)==0
+
+PHYLOSEQ.final<-prune_taxa(FF,PHYLOSEQ.final)
+```
+
+# Saving final phyloseq
+
+```{r}
+# save(PHYLOSEQ.final,file = "/media/kreising/DATA/data/Radka_Janet/DADA_PHYLOSEQ/PHYLOSEQ.final.R")
+PHYLOSEQ.final_New_met<-PHYLOSEQ.final
+save(PHYLOSEQ.final_New_met,file = "/media/kreising/DATA/data/Radka_Janet/DADA_PHYLOSEQ/PHYLOSEQ.final_New_met.R")
+```
